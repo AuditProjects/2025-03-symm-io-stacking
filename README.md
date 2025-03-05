@@ -12,6 +12,22 @@ ___
 
 ### Q: If you are integrating tokens, are you allowing only whitelisted tokens to work with the codebase or any complying with the standard? Are they assumed to have certain properties, e.g. be non-reentrant? Are there any types of [weird tokens](https://github.com/d-xo/weird-erc20) you want to integrate?
 Only whitelisted tokens can work with the codebase, and these include stablecoins such as USDC, USDT, and USDE and Tokens like SYMM.
+___
+
+### Q: Are there any limitations on values set by admins (or other roles) in the codebase, including restrictions on array lengths?
+All restricted roles are trusted. For example, in the staking contract, the number of reward tokens will not exceed 10–20.
+___
+
+### Q: Are there any limitations on values set by admins (or other roles) in protocols you integrate with, including restrictions on array lengths?
+No
+___
+
+### Q: Is the codebase expected to comply with any specific EIPs?
+No
+___
+
+### Q: Are there any off-chain mechanisms involved in the protocol (e.g., keeper bots, arbitrage bots, etc.)? We assume these mechanisms will not misbehave, delay, or go offline unless otherwise specified.
+No
 
 
 # Audit scope
