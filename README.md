@@ -6,6 +6,8 @@
 
 # Q&A
 
+### Q: On what chains are the smart contracts going to be deployed?
+All EVM compatible chains
 
 
 # Audit scope
