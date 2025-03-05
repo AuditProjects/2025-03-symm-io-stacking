@@ -7,7 +7,7 @@
 # Q&A
 
 ### Q: On what chains are the smart contracts going to be deployed?
-All EVM compatible chains
+Base
 ___
 
 ### Q: If you are integrating tokens, are you allowing only whitelisted tokens to work with the codebase or any complying with the standard? Are they assumed to have certain properties, e.g. be non-reentrant? Are there any types of [weird tokens](https://github.com/d-xo/weird-erc20) you want to integrate?
