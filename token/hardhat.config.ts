@@ -48,7 +48,7 @@ export const config: HardhatUserConfig = {
 	networks: {
 		hardhat: {
 			forking: {
-				url: "",
+				url: "https://mainnet.base.org",
 				blockNumber: 26800831,
 			},
 		},
