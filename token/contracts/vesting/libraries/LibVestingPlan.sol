@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.8.18;
 
+// lib 使用
 struct VestingPlan {
 	uint256 amount;
 	uint256 claimedAmount;
@@ -17,13 +18,14 @@ library VestingPlanOps {
 	/// @notice Calculates the unlocked amount for a vesting plan.
 	/// @param self The vesting plan.
 	/// @return The unlocked token amount.
+    // 线性解锁， 已解锁数额
 	function unlockedAmount(VestingPlan storage self) public view returns (uint256) {
 		uint256 currentTime = block.timestamp;
 		if (currentTime >= self.endTime) return self.amount;
 		if (currentTime <= self.startTime) return 0;
 		uint256 duration = self.endTime - self.startTime;
 		uint256 elapsed = currentTime - self.startTime;
-		return (self.amount * elapsed) / duration;
+		return (self.amount * elapsed) / duration; // 整体已解锁数额
 	}
 
 	/// @notice Calculates the locked token amount.
@@ -37,7 +39,7 @@ library VestingPlanOps {
 	/// @param self The vesting plan.
 	/// @return The claimable token amount.
 	function claimable(VestingPlan storage self) public view returns (uint256) {
-		return unlockedAmount(self) - self.claimedAmount;
+		return unlockedAmount(self) - self.claimedAmount; // 可索取的
 	}
 
 	/// @notice Returns the remaining duration of the vesting plan.
@@ -69,15 +71,17 @@ library VestingPlanOps {
 	/// @param amount The new total token amount.
 	/// @return The updated vesting plan.
 	function resetAmount(VestingPlan storage self, uint256 amount) public returns (VestingPlan storage) {
+        // @q 这里很容易 revert
 		if (claimable(self) != 0) revert ShouldClaimFirst();
 		if (!isSetup(self)) revert ShouldSetupFirst();
 		// Rebase the vesting plan from now.
 		uint256 remaining = remainingDuration(self);
+        // @q remaining 0 则释放已结束. 不能调用了？
 		if (remaining == 0) revert PlanIsFinished();
 		self.startTime = block.timestamp;
 		self.endTime = block.timestamp + remaining;
-		self.amount = amount;
-		self.claimedAmount = 0;
+		self.amount = amount; // change amount
+		self.claimedAmount = 0; // 0
 		return self;
 	}
 

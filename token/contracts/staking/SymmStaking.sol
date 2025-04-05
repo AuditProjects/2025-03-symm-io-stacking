@@ -21,6 +21,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	// Constants
 	//--------------------------------------------------------------------------
 
+    // 默认质押时间 一周
 	uint256 public constant DEFAULT_REWARDS_DURATION = 1 weeks;
 
 	bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
@@ -112,24 +113,27 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	//--------------------------------------------------------------------------
 
 	struct TokenRewardState {
-		uint256 duration;
-		uint256 periodFinish;
-		uint256 rate;
-		uint256 lastUpdated;
-		uint256 perTokenStored;
+		uint256 duration;     // 
+		uint256 periodFinish; // 结束时间
+		uint256 rate;         // 每秒获得奖励Token数量
+		uint256 lastUpdated;  // 
+		uint256 perTokenStored; // 
 	}
 
 	//--------------------------------------------------------------------------
 	// State Variables
 	//--------------------------------------------------------------------------
+    // 质押代币 SYMM token
 	address public stakingToken;
-
-	uint256 public totalSupply;
+    // 质押代币总余额
+	uint256 public totalSupply; 
+    // 质押代币余额
 	mapping(address => uint256) public balanceOf;
 
 	// Mapping from reward token to reward state.
 	mapping(address => TokenRewardState) public rewardState;
 	// Array of reward tokens.
+    // 奖励代币列表
 	address[] public rewardTokens;
 	// Mapping to track if a token is whitelisted for rewards.
 	mapping(address => bool) public isRewardToken;
@@ -183,6 +187,8 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @return The last time at which rewards are applicable.
 	 */
 	function lastTimeRewardApplicable(address _rewardsToken) public view returns (uint256) {
+        // if 未到结束时间  -> block.timestamp 当前时间
+        // if 已到结束时间  -> periodFinish    结束时间
 		return block.timestamp < rewardState[_rewardsToken].periodFinish ? block.timestamp : rewardState[_rewardsToken].periodFinish;
 	}
 
@@ -191,10 +197,17 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param _rewardsToken The reward token address.
 	 * @return The reward per token.
 	 */
+     // 截止当前时间，该阶段内每个质押 token 应该获得的奖励
+     // 这个阶段内总质押量是没有变的，所以可以计算出每个 质押Token应得的奖励
 	function rewardPerToken(address _rewardsToken) public view returns (uint256) {
+        // 如果质押量为 0, 该值保存不变（停止增加）
 		if (totalSupply == 0) {
 			return rewardState[_rewardsToken].perTokenStored;
 		}
+
+        // 只要有质押量
+        // 累加用户每个质押 Token 这段时间理论可以获得的奖励 =  ... + 距本周期结束时间 * 每秒获得奖励数量 * 1 / totalSupply
+        // 一直增加，池子里的 token 数量只会影响增加的幅度
 		return
 			rewardState[_rewardsToken].perTokenStored +
 			(((lastTimeRewardApplicable(_rewardsToken) - rewardState[_rewardsToken].lastUpdated) * rewardState[_rewardsToken].rate * 1e18) /
@@ -208,6 +221,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @return The amount of earned rewards.
 	 */
 	function earned(address account, address _rewardsToken) public view returns (uint256) {
+        // (质押数量 * (当前每 token价格 - 每 token 已支付的)) + rewads
 		return
 			((balanceOf[account] * (rewardPerToken(_rewardsToken) - userRewardPerTokenPaid[account][_rewardsToken])) / 1e18) +
 			rewards[account][_rewardsToken];
@@ -231,6 +245,8 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param amount The amount of SYMM tokens to deposit.
 	 * @param receiver The address receiving the staking balance.
 	 */
+    // !entry
+    // 投入 SYMM tokens
 	function deposit(uint256 amount, address receiver) external nonReentrant whenNotPaused {
 		_updateRewardsStates(receiver);
 
@@ -253,6 +269,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 		if (amount == 0) revert ZeroAmount();
 		if (to == address(0)) revert ZeroAddress();
 		if (amount > balanceOf[msg.sender]) revert InsufficientBalance(balanceOf[msg.sender], amount);
+        // 质押代币还回
 		IERC20(stakingToken).safeTransfer(to, amount);
 		totalSupply -= amount;
 		balanceOf[msg.sender] -= amount;
@@ -272,8 +289,12 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param tokens Array of reward token addresses.
 	 * @param amounts Array of reward amounts corresponding to each token.
 	 */
+    // @q 任何人都能调用?
+    // @audit-ok  DoS,添加很多 tokens? - check Whitelist
+    // 通知新的奖励和数量
 	function notifyRewardAmount(address[] calldata tokens, uint256[] calldata amounts) external nonReentrant whenNotPaused {
-		_updateRewardsStates(address(0));
+		// 更新零地址?
+        _updateRewardsStates(address(0));
 		if (tokens.length != amounts.length) revert ArraysMismatched();
 
 		uint256 len = tokens.length;
@@ -282,8 +303,9 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 			uint256 amount = amounts[i];
 
 			if (amount == 0) continue;
+            // 只要有一个不在白名单中，会 revert
 			if (!isRewardToken[token]) revert TokenNotWhitelisted(token);
-
+            // 注入合约
 			IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 			pendingRewards[token] += amount;
 			_addRewardsForToken(token, amount);
@@ -299,6 +321,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @notice Allows admin to claim rewards on behalf of a user.
 	 * @param user The user address for which to claim rewards.
 	 */
+    // admin call
 	function claimFor(address user) external nonReentrant onlyRole(REWARD_MANAGER_ROLE) whenNotPaused {
 		_updateRewardsStates(user);
 		_claimRewardsFor(user);
@@ -340,6 +363,8 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param amount The amount.
 	 * @param receiver The address of receiver
 	 */
+     
+    // @q 任意地址?
 	function rescueTokens(address token, uint256 amount, address receiver) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		IERC20(token).safeTransfer(receiver, amount);
 		emit RescueToken(token, amount, receiver);
@@ -362,19 +387,24 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	//--------------------------------------------------------------------------
 	// Internal Functions
 	//--------------------------------------------------------------------------
-
+    
 	function _addRewardsForToken(address token, uint256 amount) internal {
+        // 指定 奖励 Token 对应的状态
 		TokenRewardState storage state = rewardState[token];
-
+        // 已结束
 		if (block.timestamp >= state.periodFinish) {
+            // 新一轮: 随时间奖励的比率
 			state.rate = amount / state.duration;
 		} else {
+        // 未结束
 			uint256 remaining = state.periodFinish - block.timestamp;
-			uint256 leftover = remaining * state.rate;
+			uint256 leftover = remaining * state.rate; 
+            // 将剩余的放入下一轮
 			state.rate = (amount + leftover) / state.duration;
 		}
 
 		state.lastUpdated = block.timestamp;
+        // 唯一更新：添加新奖励后
 		state.periodFinish = block.timestamp + state.duration;
 	}
 
@@ -386,10 +416,12 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 		uint256 length = rewardTokens.length;
 		for (uint256 i = 0; i < length; ) {
 			address token = rewardTokens[i];
+            // 
 			uint256 reward = rewards[user][token];
 			if (reward > 0) {
 				rewards[user][token] = 0;
 				pendingRewards[token] -= reward;
+                // 奖励token列表中的
 				IERC20(token).safeTransfer(user, reward);
 				emit RewardClaimed(user, token, reward);
 			}
@@ -406,14 +438,19 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	function _updateRewardsStates(address account) internal {
 		uint256 length = rewardTokens.length;
 		for (uint256 i = 0; i < length; ) {
+
 			address token = rewardTokens[i];
 			TokenRewardState storage state = rewardState[token];
-
+            // 更新全局 当前 token 单位质押代币应得奖励
 			state.perTokenStored = rewardPerToken(token);
+            // 更新全局 上次更新时间
 			state.lastUpdated = lastTimeRewardApplicable(token);
 
 			if (account != address(0)) {
+                // 计算实际获得奖励,存入rewards
+                // 该用户 account 赚的
 				rewards[account][token] = earned(account, token);
+                // userRewardPerTokenPaid只在earned计算使用，完后立即更新为最新 perTokenStored值
 				userRewardPerTokenPaid[account][token] = state.perTokenStored;
 			}
 			unchecked {

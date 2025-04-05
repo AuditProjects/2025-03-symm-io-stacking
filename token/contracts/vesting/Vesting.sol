@@ -82,7 +82,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 		lockedClaimPenaltyReceiver = _lockedClaimPenaltyReceiver;
 
 		if (admin == address(0) || _lockedClaimPenaltyReceiver == address(0)) revert ZeroAddress();
-
+        // @audit-wrriten centralized
 		_grantRole(DEFAULT_ADMIN_ROLE, admin);
 		_grantRole(SETTER_ROLE, admin);
 		_grantRole(PAUSER_ROLE, admin);
@@ -164,6 +164,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @notice Claims locked tokens for the caller by percentage.
 	/// @param token Address of the token.
 	/// @param percentage Percentage of locked tokens to claim (between 0 and 1 -- 1 for 100%).
+    // @
 	function claimLockedTokenByPercentage(address token, uint256 percentage) external whenNotPaused nonReentrant {
 		_claimLockedToken(token, msg.sender, (getLockedAmountsForToken(msg.sender, token) * percentage) / 1e18);
 	}
@@ -173,6 +174,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @param token Address of the token.
 	/// @param user Address of the user.
 	/// @param amount Amount of locked tokens to claim.
+    // @audit-medium-ok OPERATOR_ROLE 可以恶意提前使用户 claim 未解锁 token，从而获取罚金
 	function claimLockedTokenFor(address token, address user, uint256 amount) external onlyRole(OPERATOR_ROLE) whenNotPaused nonReentrant {
 		_claimLockedToken(token, user, amount);
 	}
@@ -187,6 +189,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 		address user,
 		uint256 percentage
 	) external onlyRole(OPERATOR_ROLE) whenNotPaused nonReentrant {
+        // @audit-medium-ok
 		_claimLockedToken(token, user, (getLockedAmountsForToken(user, token) * percentage) / 1e18);
 	}
 
@@ -205,6 +208,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 		if (users.length != amounts.length) revert MismatchArrays();
 		uint256 len = users.length;
 		for (uint256 i = 0; i < len; i++) {
+            // @audit 对 user 和 amount 没有检查（可以设置很大）
 			address user = users[i];
 			uint256 amount = amounts[i];
 			totalVested[token] += amount;
@@ -219,6 +223,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @param token Address of the token.
 	/// @param users Array of user addresses.
 	/// @param amounts Array of new token amounts.
+    // 为多个用户重置 vestingPlans
 	function _resetVestingPlans(address token, address[] memory users, uint256[] memory amounts) internal {
 		if (users.length != amounts.length) revert MismatchArrays();
 		uint256 len = users.length;
@@ -228,9 +233,21 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 			// Claim any unlocked tokens before resetting.
 			_claimUnlockedToken(token, user);
 			VestingPlan storage vestingPlan = vestingPlans[token][user];
+            
+            // 不能比解锁的还小
 			if (amount < vestingPlan.unlockedAmount()) revert AlreadyClaimedMoreThanThis();
+            // 锁的
+            // 如果是 unlocked，但是没有 claimed
+            
+            // Amount = 100
+            // unlockedAmount  = 30 （claimableAmount = 30 - 20 = 10）
+            // lockedAmount    = 70
+            // 当前锁定的
+            
 			uint256 oldTotal = vestingPlan.lockedAmount();
-			vestingPlan.resetAmount(amount);
+            // @audit-medium 逻辑错误，没有比较 oldTotal 和 amount大小？
+            // @audit-high-ok 如果有一个revert，则 DOS
+			vestingPlan.resetAmount(amount); //重置为  amount  
 			totalVested[token] = totalVested[token] - oldTotal + amount;
 			emit VestingPlanReset(token, user, amount);
 		}
@@ -242,6 +259,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	function _ensureSufficientBalance(address token, uint256 amount) internal virtual {
 		uint256 currentBalance = IERC20(token).balanceOf(address(this));
 		if (currentBalance < amount) {
+            // @q-a 可以无限铸造 Symm？ - yes 取决于 plan
 			uint256 deficit = amount - currentBalance;
 			// This hook can be overridden to mint the token.
 			_mintTokenIfPossible(token, deficit);
@@ -251,6 +269,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @notice Virtual hook to mint tokens if the token supports minting. In the parent, this is a no-op.
 	/// @param token The address of the token.
 	/// @param amount The amount to mint.
+    // 已被重写
 	function _mintTokenIfPossible(address token, uint256 amount) internal virtual {
 		// Default implementation does nothing.
 	}
@@ -258,17 +277,23 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @notice Internal function to claim unlocked tokens.
 	/// @param token Address of the token.
 	/// @param user Address of the user.
+    // @audit-ok reentrancy?
 	function _claimUnlockedToken(address token, address user) internal {
+        // 每个人的 plan
 		VestingPlan storage vestingPlan = vestingPlans[token][user];
+        // 
 		uint256 claimableAmount = vestingPlan.claimable();
 
 		// Adjust the vesting plan
+        // totalVested 作用？
 		totalVested[token] -= claimableAmount;
 		vestingPlan.claimedAmount += claimableAmount;
 
 		// Ensure sufficient balance (minting if necessary)
 		_ensureSufficientBalance(token, claimableAmount);
 
+        // 转给用户
+        // @q 有没有转账失败的可能
 		IERC20(token).transfer(user, claimableAmount);
 
 		emit UnlockedTokenClaimed(token, user, claimableAmount);
@@ -281,17 +306,21 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	function _claimLockedToken(address token, address user, uint256 amount) internal {
 		// First, claim any unlocked tokens.
 		_claimUnlockedToken(token, user);
+        // token => user => Record
 		VestingPlan storage vestingPlan = vestingPlans[token][user];
 		if (vestingPlan.lockedAmount() < amount) revert InvalidAmount();
 
 		// Adjust the vesting plan
 		vestingPlan.resetAmount(vestingPlan.lockedAmount() - amount);
+        // @q-a 溢出会 revert
 		totalVested[token] -= amount;
+        // 惩罚数额
 		uint256 penalty = (amount * lockedClaimPenalty) / 1e18;
 
 		// Ensure sufficient balance (minting if necessary)
+        // @audit 可以无限铸造 token， 如果管理员加入一个 非常大的 amounwt ，则会铸造大量 symm
 		_ensureSufficientBalance(token, amount);
-
+        // @q-a 如果是其他代币地址？ - 各代币间不影响
 		IERC20(token).transfer(user, amount - penalty);
 		IERC20(token).transfer(lockedClaimPenaltyReceiver, penalty);
 

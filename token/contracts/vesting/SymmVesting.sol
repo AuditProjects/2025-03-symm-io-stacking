@@ -96,6 +96,7 @@ contract SymmVesting is Vesting {
 	/// @param maxUsdcIn The maximum amount of USDC that can be used (for price protection).
 	/// @return amountsIn Array of token amounts used (SYMM and USDC).
 	/// @return lpAmount The amount of LP tokens minted.
+    // 按数量添加流动性
 	function addLiquidity(
 		uint256 amount,
 		uint256 minLpAmount,
@@ -112,6 +113,7 @@ contract SymmVesting is Vesting {
 	/// @param maxUsdcIn The maximum amount of USDC that can be used (for price protection).
 	/// @return amountsIn Array of token amounts used (SYMM and USDC).
 	/// @return lpAmount The amount of LP tokens minted.
+    // 按百分比添加流动性
 	function addLiquidityByPercentage(
 		uint256 percentage,
 		uint256 minLpAmount,
@@ -127,15 +129,18 @@ contract SymmVesting is Vesting {
 		uint256 maxUsdcIn
 	) internal returns (uint256[] memory amountsIn, uint256 lpAmount) {
 		// Claim any unlocked SYMM tokens first.
+        // 领取已解锁的
 		_claimUnlockedToken(SYMM, msg.sender);
 
 		VestingPlan storage symmVestingPlan = vestingPlans[SYMM][msg.sender];
+        // 仍然锁定的 SYMM 数量
 		uint256 symmLockedAmount = symmVestingPlan.lockedAmount();
 		if (symmLockedAmount < amount) revert InvalidAmount();
 
 		_ensureSufficientBalance(SYMM, amount);
 
 		// Add liquidity to the pool.
+        // 添加流动性到其他协议
 		(amountsIn, lpAmount) = _addLiquidity(amount, minLpAmount, maxUsdcIn);
 
 		// Update SYMM vesting plan by reducing the locked amount.
@@ -169,7 +174,8 @@ contract SymmVesting is Vesting {
 	/// @return amountsIn Array containing the amounts of SYMM and USDC used.
 	/// @return lpAmount The number of LP tokens minted.
 	function _addLiquidity(uint256 symmIn, uint256 minLpAmount, uint256 maxUsdcIn) internal returns (uint256[] memory amountsIn, uint256 lpAmount) {
-		(uint256 usdcIn, uint256 expectedLpAmount) = getLiquidityQuote(symmIn);
+		// 所需要的 usdc 和期望的 Lp
+        (uint256 usdcIn, uint256 expectedLpAmount) = getLiquidityQuote(symmIn);
 
 		// Check if usdcIn exceeds maxUsdcIn parameter
 		if (maxUsdcIn > 0 && usdcIn > maxUsdcIn) revert MaxUsdcExceeded();
@@ -181,9 +187,11 @@ contract SymmVesting is Vesting {
 		(IERC20 symm, IERC20 usdc) = (poolTokens[0], poolTokens[1]);
 
 		// Pull USDC from the user and approve the VAULT.
+        // 转 usdc
 		usdc.safeTransferFrom(msg.sender, address(this), usdcIn);
 		usdc.approve(address(PERMIT2), usdcIn);
 		symm.approve(address(PERMIT2), symmIn);
+        // 向 Balancer 协议 转 symmIn， usdcIn 两种代币
 		PERMIT2.approve(SYMM, address(ROUTER), uint160(symmIn), uint48(block.timestamp));
 		PERMIT2.approve(USDC, address(ROUTER), uint160(usdcIn), uint48(block.timestamp));
 
@@ -194,6 +202,9 @@ contract SymmVesting is Vesting {
 		uint256 initialLpBalance = IERC20(SYMM_LP).balanceOf(address(this));
 
 		// Call the router to add liquidity.
+        // 与 Balancer 协议交互
+        // @audit-low MEV，调整池子权重，高滑点
+        // solution 在 addLiquidity 之前 获取当前池子价格，并在 addLiquidity 后检查滑点是否符合预期。
 		amountsIn = ROUTER.addLiquidityProportional(
 			address(POOL),
 			amountsIn,
@@ -245,13 +256,15 @@ contract SymmVesting is Vesting {
 	/// @return usdcAmount The USDC required.
 	/// @return lpAmount The LP tokens that will be minted.
 	function getLiquidityQuote(uint256 symmAmount) public view returns (uint256 usdcAmount, uint256 lpAmount) {
+        // 获取流动性池的两个代币的当前余额
 		uint256[] memory balances = POOL.getCurrentLiveBalances();
 		uint256 totalSupply = POOL.totalSupply();
 		uint256 symmBalance = balances[0];
 		uint256 usdcBalance = balances[1];
-
+        // 按比例
 		usdcAmount = (symmAmount * usdcBalance) / symmBalance;
-		usdcAmount = _mulDivUp(usdcAmount, 1e18, 1e30);
+        // @audit 精度损失？
+		usdcAmount = _mulDivUp(usdcAmount, 1e18, 1e30); // 修正精度
 		lpAmount = (symmAmount * totalSupply) / symmBalance;
 	}
 

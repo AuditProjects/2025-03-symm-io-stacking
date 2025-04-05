@@ -1,0 +1,4 @@
+.vscode
+artifacts
+node_modules
+.env

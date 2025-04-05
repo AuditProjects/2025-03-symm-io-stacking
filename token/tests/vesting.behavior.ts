@@ -350,7 +350,152 @@ export function ShouldBehaveLikeVesting() {
 			const planAfter = await symmVesting.vestingPlans(token, user)
 			await expect (planAfter.claimedAmount).to.equal(0)
 		})
+
 	})
+
+    //// added 
+    describe("SymmVesting – DoS in _resetVestingPlans", function () {
+        let owner, user1, user2;
+        let symmToken, usdcToken, symmLPToken;
+        let dummyPool, dummyRouter;
+        let symmVesting;
+      
+        beforeEach(async () => {
+          [owner, user1, user2, ...addrs] = await ethers.getSigners();
+      
+          // Deploy a mintable SYMM token and a dummy USDC token for testing
+          const TestToken = await ethers.getContractFactory("ERC20Mock");  // assume ERC20Mock has mint function
+          symmToken = await TestToken.deploy("Symm Token", "SYMM");
+          usdcToken = await TestToken.deploy("USD Coin", "USDC");
+          symmLPToken = await TestToken.deploy("Symm LP Token", "SYMM-LP");
+      
+          // Mint initial tokens to SymmVesting contract if needed (SYMM can be minted via contract, LP we'll mint manually)
+          // Deploy dummy pool contract with required interface (getTokens, getCurrentLiveBalances, totalSupply)
+          const DummyPool = await ethers.getContractFactory("DummyPool");
+          // Initialize dummy pool with SYMM and USDC token addresses and some dummy balances
+          dummyPool = await DummyPool.deploy(symmToken.address, usdcToken.address, ethers.utils.parseEther("1000000"), ethers.utils.parseEther("1000000"));
+          // totalSupply for LP (just use an arbitrary number)
+          await dummyPool.setTotalSupply(ethers.utils.parseEther("1000000"));
+      
+          // Deploy dummy router contract with required interface (addLiquidityProportional)
+          const DummyRouter = await ethers.getContractFactory("DummyRouter");
+          dummyRouter = await DummyRouter.deploy(symmLPToken.address);
+      
+          // Deploy SymmVesting contract and initialize it
+          const SymmVesting = await ethers.getContractFactory("SymmVesting");
+          symmVesting = await SymmVesting.deploy();
+          await symmVesting.initialize(
+            owner.address,                // admin (gets SETTER_ROLE, etc.)
+            owner.address,                // lockedClaimPenaltyReceiver (just reuse owner for test)
+            dummyPool.address,
+            dummyRouter.address,
+            owner.address,                // permit2 (not used in dummy, just non-zero)
+            owner.address,                // vault (not used in dummy, just non-zero)
+            symmToken.address,
+            usdcToken.address,
+            symmLPToken.address
+          );
+      
+          // Grant SymmVesting contract permission to mint SYMM (if required by our token mock)
+          // Assuming ERC20Mock mint is public, no need to grant roles.
+        });
+      
+        it("1. Multiple users with vesting plans – one user's unclaimed tokens cause reset to revert", async function () {
+          // Setup vesting plans for user1 and user2
+          const startTime = (await ethers.provider.getBlock()).timestamp;
+          const vestDuration = 1000;  // e.g. 1000 seconds duration
+          const endTime = startTime + vestDuration;
+          const amountUser1 = ethers.utils.parseEther("1000");  // 1000 SYMM for user1
+          const amountUser2 = ethers.utils.parseEther("1000");  // 1000 SYMM for user2
+      
+          // Call setupVestingPlans as admin (owner has SETTER_ROLE)
+          await symmVesting.setupVestingPlans(
+            symmToken.address,
+            startTime,
+            endTime,
+            [user1.address, user2.address],
+            [amountUser1, amountUser2]
+          );
+      
+          // Fast-forward time so that some tokens are unlocked for user2
+          const halfway = Math.floor(vestDuration / 2);
+          await ethers.provider.send("evm_increaseTime", [halfway]);  // advance half the vesting duration
+          await ethers.provider.send("evm_mine", []);  // mine a block to update block.timestamp
+      
+          // Verify that user2 now has some claimable (unlocked) tokens, and user1 does too (assuming linear vesting)
+          const user2Claimable = await symmVesting.getClaimableAmountsForToken(user2.address, symmToken.address);
+          expect(user2Claimable).to.be.gt(0, "User2 should have some unlocked (unclaimed) tokens");
+      
+          // Attempt to reset vesting plans for both users:
+          // - user1: try to keep their amount the same
+          // - user2: set a new amount lower than their already unlocked amount to trigger revert
+          const newAmountUser1 = amountUser1;  // unchanged for user1
+          const newAmountUser2 = ethers.utils.parseEther("100");  // intentionally less than user2's unlocked amount
+      
+          await expect(
+            symmVesting.resetVestingPlans(
+              symmToken.address,
+              [user1.address, user2.address],
+              [newAmountUser1, newAmountUser2]
+            )
+          ).to.be.revertedWith("AlreadyClaimedMoreThanThis");  // function should revert due to user2’s unclaimed tokens [oai_citation_attribution:2‡github.com](https://github.com/sherlock-audit/2025-03-symm-io-stacking/blob/main/token/contracts/vesting/Vesting.sol#:~:text=VestingPlan%20storage%20vestingPlan%20%3D%20vestingPlans)
+      
+          // Verify that vesting plans remain unchanged for both users (state is reverted)
+          const lockedAfter1 = await symmVesting.getLockedAmountsForToken(user1.address, symmToken.address);
+          const lockedAfter2 = await symmVesting.getLockedAmountsForToken(user2.address, symmToken.address);
+          expect(lockedAfter1).to.equal(amountUser1, "User1's vesting plan should remain unchanged after failed reset");
+          expect(lockedAfter2).to.equal(amountUser2, "User2's vesting plan should remain unchanged after failed reset");
+        });
+      
+        it("2. Existing unclaimed tokens in vesting plan affect addLiquidity (single-user flow)", async function () {
+          // First, set up a vesting plan for user2 by simulating an initial liquidity addition.
+          // For simplicity, directly call setupVestingPlans for an LP vesting (could also simulate via addLiquidity).
+          const startTime = (await ethers.provider.getBlock()).timestamp;
+          const endTime = startTime + 1000;
+          const initialLPAmount = ethers.utils.parseEther("500");  // lock 500 LP tokens for user2
+          await symmVesting.setupVestingPlans(
+            symmLPToken.address,
+            startTime,
+            endTime,
+            [user2.address],
+            [initialLPAmount]
+          );
+          // Mint and transfer those LP tokens to the vesting contract to simulate that they are held for vesting
+          await symmLPToken.mint(symmVesting.address, initialLPAmount);
+      
+          // Fast-forward time so that some LP tokens are unlocked for user2
+          await ethers.provider.send("evm_increaseTime", [500]);  // half the duration
+          await ethers.provider.send("evm_mine", []);
+      
+          // Check that user2 has some claimable LP tokens
+          const lpClaimable = await symmVesting.getClaimableAmountsForToken(user2.address, symmLPToken.address);
+          expect(lpClaimable).to.be.gt(0, "User2 should have some unlocked LP tokens before adding more liquidity");
+      
+          // Now simulate user2 adding liquidity again (which will trigger _resetVestingPlans on their LP vesting plan).
+          // Provide user2 with some SYMM and USDC to add liquidity.
+          await symmToken.mint(user2.address, ethers.utils.parseEther("100"));  // 100 SYMM to add
+          await usdcToken.mint(user2.address, ethers.utils.parseEther("1000")); // some USDC
+          // User2 approves SymmVesting to pull USDC (since addLiquidity will transfer USDC from user)
+          await usdcToken.connect(user2).approve(symmVesting.address, ethers.utils.parseEther("1000"));
+          // User2 calls addLiquidity (this will internally claim unlocked tokens and attempt to reset vesting plan)
+          const addAmountSymm = ethers.utils.parseEther("50");  // use 50 SYMM for adding liquidity
+          await expect(
+            symmVesting.connect(user2).addLiquidity(addAmountSymm, 0, 0)
+          ).to.not.be.reverted;  // ensure addLiquidity succeeds (unlocked tokens are claimed internally)
+      
+          // After addLiquidity, user2's SYMM vesting should have decreased and an LP vesting reset occurred.
+          const newLockedLP = await symmVesting.getLockedAmountsForToken(user2.address, symmLPToken.address);
+          const newLockedSymm = await symmVesting.getLockedAmountsForToken(user2.address, symmToken.address);
+          expect(newLockedLP).to.be.gt(initialLPAmount, "User2's LP vesting locked amount should increase after adding liquidity");
+          expect(newLockedSymm).to.be.lt(0, "User2's SYMM vesting locked amount should decrease after adding liquidity");  // used some SYMM
+      
+          // The addLiquidity call above internally calls _resetVestingPlans for the LP token [oai_citation_attribution:3‡github.com](https://github.com/sherlock-audit/2025-03-symm-io-stacking/blob/main/token/contracts/vesting/SymmVesting.sol#:~:text=if%20%28lpVestingPlan.isSetup%28%29%29%20).
+          // If the vesting plan had unclaimed tokens that made the new locked amount invalid, it would have reverted similar to scenario 1.
+          // This confirms the issue could affect user actions as well.
+        });
+      });
+
+
 
 	describe("modifiers",  ()=>{
 		it('should allow PAUSER_ROLE to pause and unpase the contract', async()=>{
