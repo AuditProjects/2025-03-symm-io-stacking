@@ -113,11 +113,11 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	//--------------------------------------------------------------------------
 
 	struct TokenRewardState {
-		uint256 duration;     // 
+		uint256 duration;     //
 		uint256 periodFinish; // 结束时间
 		uint256 rate;         // 每秒获得奖励Token数量
-		uint256 lastUpdated;  // 
-		uint256 perTokenStored; // 
+		uint256 lastUpdated;  //
+		uint256 perTokenStored; //
 	}
 
 	//--------------------------------------------------------------------------
@@ -126,7 +126,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
     // 质押代币 SYMM token
 	address public stakingToken;
     // 质押代币总余额
-	uint256 public totalSupply; 
+	uint256 public totalSupply;
     // 质押代币余额
 	mapping(address => uint256) public balanceOf;
 
@@ -208,6 +208,11 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
         // 只要有质押量
         // 累加用户每个质押 Token 这段时间理论可以获得的奖励 =  ... + 距本周期结束时间 * 每秒获得奖励数量 * 1 / totalSupply
         // 一直增加，池子里的 token 数量只会影响增加的幅度
+        // @report-h1 精度损失,假如该函数经常被触发, USDC奖励不会被分发
+        // ΔrewardPerToken
+        // = timeDuration * rate * 1e18 / totalSupply
+        // = 2 * 2000 * 1e18 / 1_000_000e18
+        // = 0 (精度损失)
 		return
 			rewardState[_rewardsToken].perTokenStored +
 			(((lastTimeRewardApplicable(_rewardsToken) - rewardState[_rewardsToken].lastUpdated) * rewardState[_rewardsToken].rate * 1e18) /
@@ -221,6 +226,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @return The amount of earned rewards.
 	 */
 	function earned(address account, address _rewardsToken) public view returns (uint256) {
+        // 用户首次质押时, balanceOf[account] = 0 , 所以 reward = 0
         // (质押数量 * (当前每 token价格 - 每 token 已支付的)) + rewads
 		return
 			((balanceOf[account] * (rewardPerToken(_rewardsToken) - userRewardPerTokenPaid[account][_rewardsToken])) / 1e18) +
@@ -289,9 +295,10 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param tokens Array of reward token addresses.
 	 * @param amounts Array of reward amounts corresponding to each token.
 	 */
-    // @q 任何人都能调用?
+    // @q-a 任何人都能调用? - yes
     // @audit-ok  DoS,添加很多 tokens? - check Whitelist
     // 通知新的奖励和数量
+    // @report-m4 恶意用户使用可以将质押奖励稀释
 	function notifyRewardAmount(address[] calldata tokens, uint256[] calldata amounts) external nonReentrant whenNotPaused {
 		// 更新零地址?
         _updateRewardsStates(address(0));
@@ -339,6 +346,10 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 		if (isRewardToken[token] == status) revert TokenWhitelistStatusUnchanged(token, status);
 
 		isRewardToken[token] = status;
+        // @report-m2 管理者只直接移除了Token, 但是没有更新其他状态
+        // - 会导致新加入的用户抢去旧用户的奖励, 相当于从一开始进行质押: userRewardPerTokenPaid = 0, rewardPerToken != 0
+        // - attack path: User1 deposit -> 移除token -> user2 deposit -> 添加token
+        // - poc使用原项目, js编写
 		if (!status) {
 			if (pendingRewards[token] > 10) revert OngoingRewardPeriodForToken(token, pendingRewards[token]);
 			uint256 len = rewardTokens.length;
@@ -363,7 +374,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @param amount The amount.
 	 * @param receiver The address of receiver
 	 */
-     
+
     // @q 任意地址?
 	function rescueTokens(address token, uint256 amount, address receiver) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
 		IERC20(token).safeTransfer(receiver, amount);
@@ -387,19 +398,23 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	//--------------------------------------------------------------------------
 	// Internal Functions
 	//--------------------------------------------------------------------------
-    
+
 	function _addRewardsForToken(address token, uint256 amount) internal {
         // 指定 奖励 Token 对应的状态
 		TokenRewardState storage state = rewardState[token];
         // 已结束
 		if (block.timestamp >= state.periodFinish) {
             // 新一轮: 随时间奖励的比率
+            // @report-m4
+            // 每一次通知奖励都进入下一轮,有问题
 			state.rate = amount / state.duration;
 		} else {
         // 未结束
 			uint256 remaining = state.periodFinish - block.timestamp;
-			uint256 leftover = remaining * state.rate; 
+			uint256 leftover = remaining * state.rate;
             // 将剩余的放入下一轮
+            // @report-m4
+            // - 每次投入一点,将rate稀释
 			state.rate = (amount + leftover) / state.duration;
 		}
 
@@ -416,7 +431,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 		uint256 length = rewardTokens.length;
 		for (uint256 i = 0; i < length; ) {
 			address token = rewardTokens[i];
-            // 
+            //
 			uint256 reward = rewards[user][token];
 			if (reward > 0) {
 				rewards[user][token] = 0;
@@ -435,6 +450,7 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 	 * @dev Updates the rewards for an account for all reward tokens.
 	 * @param account The account to update.
 	 */
+    // @report-h1
 	function _updateRewardsStates(address account) internal {
 		uint256 length = rewardTokens.length;
 		for (uint256 i = 0; i < length; ) {
@@ -448,8 +464,9 @@ contract SymmStaking is Initializable, AccessControlEnumerableUpgradeable, Reent
 
 			if (account != address(0)) {
                 // 计算实际获得奖励,存入rewards
-                // 该用户 account 赚的
+                // 该用户 account 最终赚的
 				rewards[account][token] = earned(account, token);
+                // 用户最后一次操作时的“快照”
                 // userRewardPerTokenPaid只在earned计算使用，完后立即更新为最新 perTokenStored值
 				userRewardPerTokenPaid[account][token] = state.perTokenStored;
 			}

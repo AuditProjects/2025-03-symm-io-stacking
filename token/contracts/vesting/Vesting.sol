@@ -73,6 +73,8 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @param admin Address to receive the admin and role assignments.
 	/// @param _lockedClaimPenalty Penalty rate (scaled by 1e18) for locked token claims.
 	/// @param _lockedClaimPenaltyReceiver Address that receives the penalty.
+    // @report-m1 父合约和子合约都调用了 initializer
+    // initializer 保证在代理模式中, 这个函数只被调用一次
 	function __vesting_init(address admin, uint256 _lockedClaimPenalty, address _lockedClaimPenaltyReceiver) public initializer {
 		__AccessControlEnumerable_init();
 		__Pausable_init();
@@ -223,7 +225,10 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	/// @param token Address of the token.
 	/// @param users Array of user addresses.
 	/// @param amounts Array of new token amounts.
-    // 为多个用户重置 vestingPlans
+    // 为多个用户重置 vestingPlans, 每个用户每个token都有一个锁仓计划
+    // @report-m5 双花攻击/抢先交易,用户可以拿两次, 未检查状态(未考虑用户是否已经提前强制领取了部分 locked token)
+    // - 首先, 用户调用 claimLockedToken
+    // - 然后, 管理员调用 resetVestingPlans
 	function _resetVestingPlans(address token, address[] memory users, uint256[] memory amounts) internal {
 		if (users.length != amounts.length) revert MismatchArrays();
 		uint256 len = users.length;
@@ -231,23 +236,27 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 			address user = users[i];
 			uint256 amount = amounts[i];
 			// Claim any unlocked tokens before resetting.
+            // 取出已解锁的
 			_claimUnlockedToken(token, user);
 			VestingPlan storage vestingPlan = vestingPlans[token][user];
-            
-            // 不能比解锁的还小
+
+            // 新设置的总金额不能比已经解锁的还小
+            // @report-m3 ? 阻止用户添加额外流动性
+            // - PoC使用了Foundry! (在hardhat项目中Integrating with Foundry)
 			if (amount < vestingPlan.unlockedAmount()) revert AlreadyClaimedMoreThanThis();
             // 锁的
             // 如果是 unlocked，但是没有 claimed
-            
+
             // Amount = 100
             // unlockedAmount  = 30 （claimableAmount = 30 - 20 = 10）
             // lockedAmount    = 70
             // 当前锁定的
-            
+
 			uint256 oldTotal = vestingPlan.lockedAmount();
-            // @audit-medium 逻辑错误，没有比较 oldTotal 和 amount大小？
-            // @audit-high-ok 如果有一个revert，则 DOS
-			vestingPlan.resetAmount(amount); //重置为  amount  
+            // @audit-m 逻辑错误，没有比较 oldTotal 和 amount大小？
+            // @audit-h-ok 如果有一个revert，则 DOS
+            // 这里将 claimedAmount 清零
+			vestingPlan.resetAmount(amount); //重置为  amount
 			totalVested[token] = totalVested[token] - oldTotal + amount;
 			emit VestingPlanReset(token, user, amount);
 		}
@@ -281,7 +290,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 	function _claimUnlockedToken(address token, address user) internal {
         // 每个人的 plan
 		VestingPlan storage vestingPlan = vestingPlans[token][user];
-        // 
+        //
 		uint256 claimableAmount = vestingPlan.claimable();
 
 		// Adjust the vesting plan
@@ -293,7 +302,7 @@ contract Vesting is Initializable, AccessControlEnumerableUpgradeable, PausableU
 		_ensureSufficientBalance(token, claimableAmount);
 
         // 转给用户
-        // @q 有没有转账失败的可能
+        // @q-a 有没有转账失败的可能 - no
 		IERC20(token).transfer(user, claimableAmount);
 
 		emit UnlockedTokenClaimed(token, user, claimableAmount);

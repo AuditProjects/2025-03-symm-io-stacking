@@ -62,7 +62,7 @@ contract SymmVesting is Vesting {
 		address _symm,
 		address _usdc,
 		address _symm_lp
-	) public initializer {
+	) public initializer { // @report 又调用一次
 		if (
 			admin == address(0) ||
 			_lockedClaimPenaltyReceiver == address(0) ||
@@ -74,6 +74,7 @@ contract SymmVesting is Vesting {
 			_usdc == address(0) ||
 			_symm_lp == address(0)
 		) revert ZeroAddress();
+        // 父合约中初始化
 		__vesting_init(admin, 500000000000000000, _lockedClaimPenaltyReceiver);
 		POOL = IPool(_pool);
 		ROUTER = IRouter(_router);
@@ -158,6 +159,7 @@ contract SymmVesting is Vesting {
 
 		// Increase the locked amount by the received LP tokens.
 		if (lpVestingPlan.isSetup()) {
+            // ?自动更新锁仓计划
 			_resetVestingPlans(SYMM_LP, users, amounts);
 		} else {
 			_setupVestingPlans(SYMM_LP, block.timestamp, symmVestingPlan.endTime, users, amounts);
